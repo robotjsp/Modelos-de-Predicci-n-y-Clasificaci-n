@@ -1,0 +1,123 @@
+==============================================================================
+RESUMEN AUTOMÁTICO · EA2 Modelos de predicción y clasificación
+Fecha de ejecución: 2026-11-08 22:19:12 (hora de Colombia) · scikit-learn 1.9.1
+==============================================================================
+
+1. DATASET
+------------------------------------------------------------------------------
+Identificador: jdavit/colombian-conflict-SQA
+Enlace: https://huggingface.co/datasets/jdavit/colombian-conflict-SQA
+Configuración: default · splits: ['train', 'test']
+Contenido: preguntas y respuestas en español sobre informes del conflicto armado colombiano.
+DataFrame crudo: 2925 filas x 5 columnas (question, context, answer, generated_by, split_origen)
+
+2. PREPROCESAMIENTO
+------------------------------------------------------------------------------
+Validación (métrica y decisión):
+                                           validación  métrica                              decisión
+             Completitud · nulos (todas las columnas)        0           convertir a vacío y revisar
+                         Completitud · question vacía        0                         eliminar fila
+                           Completitud · answer vacía        0                         eliminar fila
+                          Completitud · context vacío       11 conservar y marcar tiene_contexto = 0
+Unicidad · filas duplicadas (question+context+answer)        0                              eliminar
+ Formato · textos con espacios dobles o en los bordes        4                   normalizar espacios
+          Dominio · valores distintos de generated_by        3                 convertir a categoría
+
+Registro de limpieza (filas por paso):
+                       paso  filas  cambio                                                                por qué
+               datos crudos   2925       0                                           train + test de Hugging Face
+      espacios normalizados   2925       0 los espacios extra cambian el conteo de palabras y esconden duplicados
+   con pregunta y respuesta   2925       0                  sin pregunta o sin respuesta no hay nada que aprender
+             sin duplicados   2925       0  una fila repetida en entrenamiento y prueba sería ver el examen antes
+generated_by como categoría   2925       0                     es una etiqueta (qué IA respondió), no texto libre
+
+Enriquecimiento: de 5 a 15 columnas. Se midieron los textos (palabras y caracteres), se marcó si hay contexto, se creó la etiqueta tipo_pregunta y columnas 0/1 (one-hot) para tipo_pregunta y generated_by.
+Fuga de información: las reglas anteriores no aprenden de los datos. TF-IDF, que sí aprende un vocabulario, se ajusta solo con entrenamiento dentro del Pipeline del clasificador.
+
+3. MODELO DE REGRESIÓN LINEAL
+------------------------------------------------------------------------------
+Objetivo: predecir cuántos caracteres tendrá la respuesta escrita por la IA.
+Variable objetivo (y): largo_respuesta_car (numérica continua)
+Variables predictoras (X): ['largo_pregunta_palabras', 'largo_contexto_palabras', 'tiene_contexto', 'tipo_hallazgos', 'tipo_hechos_especificos', 'generado_gpt4o']
+Variable descartada: menciona_codigo_informe (correlación -0.58 con tipo_hechos_especificos: dice casi lo mismo y volvería inestables los coeficientes).
+Algoritmo: LinearRegression (mínimos cuadrados) con parámetros predeterminados.
+División: test_size=0.2, random_state=42 · entrenamiento=2340 filas, prueba=585 filas.
+Modelo guardado: entrenamiento/20261108_221911_937160_modelo.pkl
+
+Métricas en prueba: MAE=61.56 · RMSE=96.49 · R²=0.3630 · MAE de Pere=87.27
+Intercepto b = 152.15
+Coeficientes w:
+               variable      w                                                                                                           lectura
+         tiene_contexto 158.44                   si la pregunta trae contexto (1) frente a no traerlo (0), la respuesta cambia +158.4 caracteres
+         generado_gpt4o -74.78                       si la respuesta la escribió gpt-4o (frente a otra IA), la respuesta cambia -74.8 caracteres
+tipo_hechos_especificos -66.02 si la pregunta es de hechos específicos (frente a causas y recomendaciones), la respuesta cambia -66.0 caracteres
+         tipo_hallazgos   9.09            si la pregunta pide hallazgos (frente a causas y recomendaciones), la respuesta cambia +9.1 caracteres
+largo_contexto_palabras   1.22                                             por cada palabra más de contexto, la respuesta cambia +1.2 caracteres
+largo_pregunta_palabras   0.33                                          por cada palabra más en la pregunta, la respuesta cambia +0.3 caracteres
+
+Interpretación:
+  - MAE = 62: en promedio el modelo se equivoca en 62 caracteres, frente a respuestas que miden en promedio 308 (error típico del 20 %).
+  - RMSE = 96: es mayor que el MAE porque castiga más los errores grandes; algunas respuestas se salen mucho de lo esperado.
+  - R² = 0.36: el modelo explica cerca del 36 % de las diferencias de largo entre respuestas; el resto depende del contenido del informe, que el modelo no lee.
+  - Pere (predecir siempre el promedio) tiene MAE = 87; el modelo reduce el error en 29 %.
+  - R² entrenamiento = 0.35 vs prueba = 0.36: parecidos, no hay señales de sobreajuste (el modelo no memorizó).
+  - Variable con más peso: tiene_contexto (si la pregunta trae contexto (1) frente a no traerlo (0), la respuesta cambia +158.4 caracteres).
+  - b = 152: largo esperado cuando todas las variables valen 0 (pregunta de causas y recomendaciones, sin contexto, escrita por otra IA). Es el punto de partida de la recta; una pregunta de 0 palabras no existe en la realidad.
+Limitaciones:
+  - Supone relaciones en línea recta; el efecto real del contexto puede no serlo.
+  - Mide los textos pero no entiende su significado.
+  - Las respuestas las escribió una IA: el modelo describe el estilo de esa IA.
+  - Varias preguntas tratan del mismo informe; preguntas parecidas pueden quedar en entrenamiento y prueba.
+
+4. MODELO DE CLASIFICACIÓN
+------------------------------------------------------------------------------
+Objetivo: a partir de la respuesta, identificar qué tipo de pregunta se hizo.
+Variable objetivo (y): tipo_pregunta · clases: ['causas_y_recomendaciones', 'hallazgos', 'hechos_especificos']
+Regla de la etiqueta: 'causas estructurales' o 'no repetición' -> causas_y_recomendaciones; 'hallazgos' -> hallazgos; cualquier otra -> hechos_especificos.
+Variable predictora (X): answer convertida en números con TF-IDF. No se usa la pregunta: de ella sale la etiqueta (sería darle la respuesta del examen).
+Algoritmo: TfidfVectorizer(ngram_range=(1, 2), max_features=3000, min_df=2, stop_words=español) -> LogisticRegression(class_weight=balanced, max_iter=2000, C=1.0)
+Por qué: la regresión logística funciona bien con texto convertido en números, es rápida y deja ver qué palabras usa para decidir. class_weight='balanced' compensa las clases con menos ejemplos.
+División estratificada: test_size=0.2, random_state=42 · entrenamiento=2312, prueba=579.
+Distribución de clases en prueba: {'hechos_especificos': 340, 'hallazgos': 125, 'causas_y_recomendaciones': 114}
+Modelo guardado: entrenamiento/20261108_221912_260975_LogisticRegression.pkl
+
+Métricas en prueba: exactitud=0.9136 · F1 macro=0.9050 · F1 ponderado=0.9142 · exactitud de Pere=0.5872
+                          precision  recall      f1  casos
+causas_y_recomendaciones     0.9153  0.9474  0.9310    114
+hallazgos                    0.8271  0.8800  0.8527    125
+hechos_especificos           0.9482  0.9147  0.9311    340
+
+Matriz de confusión (filas = real, columnas = predicho):
+                               pred causas_y_recomendaciones  pred hallazgos  pred hechos_especificos
+real causas_y_recomendaciones                            108               3                        3
+real hallazgos                                             1             110                       14
+real hechos_especificos                                    9              20                      311
+
+Palabras que más empujan hacia cada clase:
+causas_y_recomendaciones             hallazgos   hechos_especificos
+              repeticion               destaca          testimonios
+              recomienda               resalta            documenta
+                  causas              concluye             amenazas
+           estructurales             hallazgos                actos
+    causas estructurales                revela                casos
+                prevenir hallazgos principales           reflejando
+ estructurales conflicto           principales              quienes
+                  evitar               subraya testimonios victimas
+
+Interpretación:
+  - Exactitud = 91.4%: de cada 100 respuestas de prueba acierta el tipo de pregunta en unas 91.
+  - Pere (decir siempre 'hechos_especificos') acierta 58.7%; el modelo lo supera por 32.6 puntos.
+  - Las clases no tienen el mismo tamaño, así que también se usa F1 macro = 0.90 (promedio de F1 donde cada clase pesa igual) para que una clase pequeña no quede escondida.
+  - Clase que mejor reconoce: hechos_especificos (F1 = 0.93); la más difícil: hallazgos (F1 = 0.85).
+  - Error más frecuente: 20 respuestas de hechos_especificos se clasificaron como hallazgos; ocurre cuando una respuesta mezcla temas (hallazgos que también narran hechos concretos).
+Limitaciones:
+  - La etiqueta sale de una regla; si la regla se equivoca, el modelo aprende ese error.
+  - Las respuestas siguen plantillas, lo que facilita la tarea; con textos libres el resultado bajaría.
+  - TF-IDF no entiende el orden ni el significado de las palabras, solo cuáles aparecen.
+
+5. CONCLUSIONES
+------------------------------------------------------------------------------
+  - La regresión explica 36 % de la variación del largo de las respuestas, con un error típico de 62 caracteres: sirve como estimación aproximada.
+  - El clasificador reconoce el tipo de pregunta con 91% de exactitud y F1 macro 0.90 usando solo la respuesta.
+  - Ambos modelos funcionan porque la IA responde con patrones; describen su estilo más que el conflicto.
+  - Mejora posible: dividir por informe para que un mismo informe no quede en entrenamiento y prueba.
